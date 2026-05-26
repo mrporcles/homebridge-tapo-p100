@@ -56,12 +56,13 @@ export default class TpapCipher {
 
     try {
       // Step 1: Prepare credentials for P100/P110 with pake:[2]
-      // Use "admin" as username (not email) and md5 hash for pake_register
+      // Based on python-kasa findings: try multiple credential combinations
       const adminUsername = 'admin';
       const hashedUsername = this._crypto.createHash('md5').update(adminUsername).digest('hex');
       
-      // Use raw password (not double-hashed) - sha1(raw_password) for passwd_id=2
-      const hashedPassword = this._crypto.createHash('sha1').update(password).digest('hex');
+      // Try raw password first (python-kasa suggests this for tls=0 devices)
+      // The -2402 error suggests we need the raw password, not hashed
+      const rawPassword = password;
 
       this.log.debug('TPAP: Using admin credentials for pake_register');
 
@@ -70,7 +71,7 @@ export default class TpapCipher {
         method: 'pake_register',
         params: {
           username: hashedUsername,
-          password: hashedPassword,
+          password: rawPassword,  // Use raw password for tls=0 devices
           passcode_type: 'userpw', // For pake:[2] devices
         },
       };

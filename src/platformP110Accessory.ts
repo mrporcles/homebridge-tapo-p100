@@ -70,9 +70,10 @@ export class P110Accessory extends TPLinkPlatformAccessory<P110>{
       setTimeout(()=>{
         this.updateState(interval);
       }, interval);
-    }).catch(() => {
+    }).catch((error) => {
       this.setNoResponse();
-      this.log.error('Get Device Info failed');
+      this.log.error('Get Device Info failed:', error.message);
+      this.log.debug('Full error:', error);
     });
   }
 

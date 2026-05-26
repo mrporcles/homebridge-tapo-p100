@@ -46,10 +46,10 @@ async function testP110(ip: string, email: string, password: string) {
 
   const p110 = new P110(log, ip, email, password, 5);
 
-  console.log('Initializing (trying TPAP first for firmware 1.4.0+)...');
+  console.log('Initializing (trying TPAP first for firmware 1.4.6+ HTTPS)...');
   try {
     await p110.handshake_tpap();
-    console.log('✓ TPAP handshake successful (firmware 1.4.0+)');
+    console.log('✓ TPAP handshake successful (firmware 1.4.6+ HTTPS port 4433)');
   } catch (error) {
     console.log('✗ TPAP handshake failed:', (error as Error).message);
     console.log('Trying KLAP handshake...');

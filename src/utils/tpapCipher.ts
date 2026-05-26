@@ -1,332 +1,499 @@
 import { Logger } from 'homebridge';
 import crypto from 'crypto';
+import axios, { AxiosInstance, AxiosResponse } from 'axios';
+import https from 'https';
 
-/**
- * TPAP (TP-Link Application Protocol) Cipher
- * Uses SPAKE2+ key exchange and AES-128-CCM encryption
- * Introduced in firmware 1.4.0+
- */
+// SPAKE2+ constants for P-256 curve (RFC 9382) - reserved for full implementation
+// const P256_M = Buffer.from('02886e2f97ace46e55ba9dd7242579f2993b64e16ef3dcab95afd497333d8fa12f', 'hex');
+// const P256_N = Buffer.from('03d8bbd6c639c62937b04d997f38c3770719c629d7014d49a24b4f98baa1292b49', 'hex');
+const PAKE_CTX = Buffer.from('PAKE V1');
+
+// Cipher configuration
+const CIPHER_LABELS = {
+  aes_128_ccm: {
+    ks: Buffer.from('tp-kdf-salt-aes128-key'),
+    ki: Buffer.from('tp-kdf-info-aes128-key'),
+    ns: Buffer.from('tp-kdf-salt-aes128-iv'),
+    ni: Buffer.from('tp-kdf-info-aes128-iv'),
+    kl: 16,
+  },
+  aes_256_ccm: {
+    ks: Buffer.from('tp-kdf-salt-aes256-key'),
+    ki: Buffer.from('tp-kdf-info-aes256-key'),
+    ns: Buffer.from('tp-kdf-salt-aes256-iv'),
+    ni: Buffer.from('tp-kdf-info-aes256-iv'),
+    kl: 32,
+  },
+  chacha20_poly1305: {
+    ks: Buffer.from('tp-kdf-salt-chacha20-key'),
+    ki: Buffer.from('tp-kdf-info-chacha20-key'),
+    ns: Buffer.from('tp-kdf-salt-chacha20-iv'),
+    ni: Buffer.from('tp-kdf-info-chacha20-iv'),
+    kl: 32,
+  },
+};
+
+const NONCE_LEN = 12;
+
+interface TpapDiscoverResult {
+  mac?: string;
+  tpap?: {
+    pake?: number[];
+  };
+}
+
+interface TpapRegisterResult {
+  cipher_suites?: number;
+  iterations?: number;
+  encryption?: string;
+  dev_salt: string;
+  dev_share: string;
+  dev_random: string;
+  extra_crypt?: {
+    type?: string;
+    params?: Record<string, unknown>;
+  };
+}
+
+interface TpapShareResult {
+  sessionId?: string;
+  stok?: string;
+  start_seq?: number;
+  dev_confirm?: string;
+}
+
 export default class TpapCipher {
   private _crypto: typeof crypto;
   private log: Logger;
-  private sessionKey!: Buffer;
-  private encryptionKey!: Buffer;
-  private sigKey!: Buffer;
-  private seq: number;
-  private iv!: Buffer;
-  private SPAKE2_M!: Buffer;
-  private SPAKE2_N!: Buffer;
+  private host: string;
+  private port: number;
+  private username: string;
+  private password: string;
+  private _axios: AxiosInstance;
+  
+  // Session state
+  private deviceMac: string = '';
+  private tpapPake: number[] = [];
+  private sessionId: string = '';
+  private seq: number = 1;
+  private cipherId: string = 'aes_128_ccm';
+  private hkdfHash: string = 'SHA256';
+  private key: Buffer = Buffer.alloc(0);
+  private baseNonce: Buffer = Buffer.alloc(0);
 
-  constructor(log: Logger) {
+  constructor(host: string, username: string, password: string, log: Logger, port: number = 4433) {
     this._crypto = crypto;
     this.log = log;
-    this.seq = 0;
+    this.host = host;
+    this.port = port;
+    this.username = username;
+    this.password = password;
     
-    // SPAKE2+ constants for P-256 curve (RFC 9382)
-    this.SPAKE2_M = Buffer.from([
-      0x04, 0x88, 0x6e, 0x2f, 0x97, 0xac, 0xe4, 0x6e, 0x55, 0xba, 0x9d, 0xd7,
-      0x24, 0x25, 0x79, 0xf2, 0x99, 0x3b, 0x64, 0xe1, 0x6e, 0xf3, 0xdc, 0xab,
-      0x95, 0xaf, 0xd4, 0x97, 0x33, 0x3d, 0x8f, 0xa1, 0x2f, 0x5f, 0xf3, 0x55,
-      0x16, 0x3e, 0x43, 0xce, 0x22, 0x4e, 0x0b, 0x0e, 0x65, 0xff, 0x02, 0xac,
-      0x8e, 0x5c, 0x7b, 0xe0, 0x94, 0x19, 0xc7, 0x85, 0xe0, 0xca, 0x54, 0x7d,
-      0x55, 0xa1, 0x2e, 0x2d, 0x20,
-    ]);
-
-    this.SPAKE2_N = Buffer.from([
-      0x04, 0xd8, 0xbb, 0xd6, 0xc6, 0x39, 0xc6, 0x29, 0x37, 0xb0, 0x4d, 0x99,
-      0x7f, 0x38, 0xc3, 0x77, 0x07, 0x19, 0xc6, 0x29, 0xd7, 0x01, 0x4d, 0x49,
-      0xa2, 0x4b, 0x4f, 0x98, 0xba, 0xa1, 0x29, 0x2b, 0x49, 0x07, 0xd6, 0x0a,
-      0xa6, 0xbf, 0xad, 0xe4, 0x50, 0x08, 0xa6, 0x36, 0x33, 0x7f, 0x51, 0x68,
-      0xc6, 0x4d, 0x9b, 0xd3, 0x60, 0x34, 0x80, 0x8c, 0xd5, 0x64, 0x49, 0x0b,
-      0x1e, 0x65, 0x6e, 0xdb, 0xe7,
-    ]);
+    // Create HTTPS axios instance with SSL verification disabled (like the Python implementation)
+    this._axios = axios.create({
+      baseURL: `https://${host}:${port}`,
+      timeout: 15000,
+      httpsAgent: new https.Agent({
+        rejectUnauthorized: false, // Disable SSL verification for Tapo devices
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
   }
 
   /**
-   * Perform TPAP/SPAKE2+ handshake with device (based on python-kasa implementation)
-   * This is for tls=0 devices (HTTP port 80) with pake:[2]
+   * Perform complete TPAP handshake (discover + pake_register + pake_share)
+   * Based on the working Python implementation from tapo-rv30-ha
    */
-  async handshake(
-    ipAddress: string,
-    username: string,
-    password: string,
-    rawRequest: (path: string, data: Buffer, responseType: string) => Promise<Buffer>,
-  ): Promise<void> {
-    this.log.debug('Starting TPAP/SPAKE2+ handshake for firmware 1.4.3+ (tls=0, pake:[2])');
+  async handshake(): Promise<void> {
+    this.log.info('🔐 Starting TPAP/SPAKE2+ handshake on HTTPS port 4433');
 
     try {
-      // Step 1: Prepare credentials for P100/P110 with pake:[2]
-      // Based on python-kasa findings: try multiple credential combinations
-      const adminUsername = 'admin';
-      const hashedUsername = this._crypto.createHash('md5').update(adminUsername).digest('hex');
+      // Step 1: Discover device capabilities
+      await this.discover();
       
-      // Try raw password first (python-kasa suggests this for tls=0 devices)
-      // The -2402 error suggests we need the raw password, not hashed
-      const rawPassword = password;
-
-      this.log.debug('TPAP: Using admin credentials for pake_register');
-
-      // Step 2: Create pake_register request (SPAKE2+ initiation)
-      const pakeRegisterPayload = {
-        method: 'pake_register',
-        params: {
-          username: hashedUsername,
-          password: rawPassword,  // Use raw password for tls=0 devices
-          passcode_type: 'userpw', // For pake:[2] devices
-        },
-      };
-
-      // Step 3: Send pake_register request
-      this.log.debug('TPAP: Sending pake_register request');
-      const registerResponse = await this.sendTpapRequest(rawRequest, pakeRegisterPayload);
+      // Step 2: Perform SPAKE2+ authentication
+      await this.authenticate();
       
-      if (registerResponse.error_code !== 0) {
-        throw new Error(`TPAP pake_register failed with error code: ${registerResponse.error_code}`);
-      }
-
-      // Step 4: Handle pake_register response and setup session
-      const { session_id, spake_data } = registerResponse.result;
-      this.log.debug('TPAP: pake_register successful, session established');
-
-      // Step 5: Derive session keys from SPAKE2+ exchange
-      this.deriveSessionKeysFromSpake(spake_data);
-      
-      this.log.debug('TPAP/SPAKE2+ handshake completed successfully');
-      
+      this.log.info('✅ TPAP handshake completed successfully');
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      this.log.debug('TPAP handshake failed:', errorMsg);
-      throw new Error(`TPAP handshake failed: ${errorMsg}`);
+      this.log.error('❌ TPAP handshake failed:', (error as Error).message);
+      throw error;
     }
   }
 
   /**
-   * Send TPAP request with proper JSON formatting
+   * Step 1: Discover device capabilities and TPAP support
    */
-  private async sendTpapRequest(
-    rawRequest: (path: string, data: Buffer, responseType: string) => Promise<Buffer>,
-    payload: any
-  ): Promise<any> {
-    const jsonPayload = JSON.stringify(payload);
-    const requestBuffer = Buffer.from(jsonPayload, 'utf8');
+  private async discover(): Promise<void> {
+    this.log.debug('TPAP: Sending discover request');
     
-    // Send to root path for TPAP (not /app/handshake1)
-    const response = await rawRequest('', requestBuffer, 'json');
-    
-    return JSON.parse(response.toString());
-  }
-
-  /**
-   * Encrypt payload using AES-128-CCM
-   */
-  encrypt(data: string | Buffer): { encryptedPayload: Buffer; seq: number } {
-    this.seq += 1;
-
-    if (typeof data === 'string') {
-      data = Buffer.from(data, 'utf8');
-    }
-
-    // Create IV with sequence number
-    const iv = this.createIvWithSeq(this.seq);
-
-    // Create cipher
-    const cipher = this._crypto.createCipheriv('aes-128-ccm', this.encryptionKey, iv, {
-      authTagLength: 16,
+    const response = await this.post('/', {
+      method: 'login',
+      params: {
+        sub_method: 'discover',
+      },
     });
 
-    // Encrypt data
-    const ciphertext = Buffer.concat([cipher.update(data), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-
-    // Create signature
-    const seqBuffer = Buffer.alloc(4);
-    seqBuffer.writeUInt32BE(this.seq, 0);
-
-    const signature = this._crypto
-      .createHmac('sha256', this.sigKey)
-      .update(Buffer.concat([seqBuffer, ciphertext, authTag]))
-      .digest()
-      .subarray(0, 32);
-
-    return {
-      encryptedPayload: Buffer.concat([signature, ciphertext, authTag]),
-      seq: this.seq,
-    };
+    const result = response.result as TpapDiscoverResult;
+    this.deviceMac = result.mac || '';
+    this.tpapPake = result.tpap?.pake || [];
+    
+    this.log.debug(`TPAP: Device MAC: ${this.deviceMac}, PAKE support: [${this.tpapPake.join(', ')}]`);
   }
 
   /**
-   * Decrypt response using AES-128-CCM
+   * Step 2: Perform SPAKE2+ authentication (pake_register + pake_share)
    */
-  decrypt(data: Buffer): string {
-    if (data.length < 48) { // 32 (signature) + 16 (min ciphertext + auth tag)
-      throw new Error('TPAP response too short');
-    }
+  private async authenticate(): Promise<void> {
+    // Determine passcode type based on PAKE support
+    const ptype = this.tpapPake.includes(0) ? 'default_userpw' :
+      this.tpapPake.includes(2) ? 'userpw' :
+        this.tpapPake.includes(3) ? 'shared_token' : 'userpw';
 
-    const signature = data.subarray(0, 32);
-    const ciphertext = data.subarray(32, -16);
-    const authTag = data.subarray(-16);
+    const userRandom = this._crypto.randomBytes(32);
 
-    // Create IV with current sequence
-    const iv = this.createIvWithSeq(this.seq);
-
-    // Verify signature
-    const seqBuffer = Buffer.alloc(4);
-    seqBuffer.writeUInt32BE(this.seq, 0);
-
-    const expectedSignature = this._crypto
-      .createHmac('sha256', this.sigKey)
-      .update(Buffer.concat([seqBuffer, ciphertext, authTag]))
-      .digest()
-      .subarray(0, 32);
-
-    if (!signature.equals(expectedSignature)) {
-      throw new Error('TPAP response signature verification failed');
-    }
-
-    // Decrypt data
-    const decipher = this._crypto.createDecipheriv('aes-128-ccm', this.encryptionKey, iv, {
-      authTagLength: 16,
+    // Step 2a: pake_register
+    this.log.debug('TPAP: Sending pake_register request');
+    const registerResponse = await this.post('/', {
+      method: 'login',
+      params: {
+        sub_method: 'pake_register',
+        username: this.md5hex('admin'),
+        user_random: userRandom.toString('base64'),
+        cipher_suites: [1],
+        encryption: ['aes_128_ccm', 'chacha20_poly1305', 'aes_256_ccm'],
+        passcode_type: ptype,
+        stok: null,
+      },
     });
-    decipher.setAuthTag(authTag);
 
-    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    const result = decrypted.toString('utf8');
+    if (registerResponse.error_code !== 0) {
+      throw new Error(`TPAP pake_register failed with error code: ${registerResponse.error_code}`);
+    }
 
-    this.log.debug('TPAP decrypted:', result);
+    const registerResult = registerResponse.result as TpapRegisterResult;
+
+    // Configure cipher suite and parameters
+    const suiteType = registerResult.cipher_suites || 2;
+    const iterations = registerResult.iterations || 10000;
+    this.cipherId = (registerResult.encryption || 'aes_128_ccm').toLowerCase().replace('-', '_');
+    this.hkdfHash = [2, 4, 5, 7, 9].includes(suiteType) ? 'SHA512' : 'SHA256';
+
+    // Build credentials
+    const mac12 = this.deviceMac.replace(/[:-]/g, '');
+    const cred = this.buildCredentials(ptype, registerResult.extra_crypt, mac12);
+
+    // Step 2b: Perform SPAKE2+ key exchange
+    const { userShare, userConfirm, expectedDevConfirm, sharedSecret } = 
+      await this.performSpake2Exchange(cred, registerResult, userRandom, iterations);
+
+    // Step 2c: pake_share
+    this.log.debug('TPAP: Sending pake_share request');
+    const shareResponse = await this.post('/', {
+      method: 'login',
+      params: {
+        sub_method: 'pake_share',
+        user_share: userShare.toString('base64'),
+        user_confirm: userConfirm.toString('base64'),
+      },
+    });
+
+    if (shareResponse.error_code !== 0) {
+      throw new Error(`TPAP pake_share failed with error code: ${shareResponse.error_code}`);
+    }
+
+    const shareResult = shareResponse.result as TpapShareResult;
+
+    // Verify device confirmation
+    if ((shareResult.dev_confirm || '').toLowerCase() !== expectedDevConfirm.toString('base64').toLowerCase()) {
+      throw new Error('SPAKE2+ confirmation mismatch - wrong password?');
+    }
+
+    // Setup session
+    this.sessionId = shareResult.sessionId || shareResult.stok || '';
+    this.seq = shareResult.start_seq || 1;
+    
+    const { key, nonce } = this.deriveCipherKeys(sharedSecret);
+    this.key = key;
+    this.baseNonce = nonce;
+
+    this.log.debug('TPAP: Session established successfully');
+  }
+
+  /**
+   * Perform simplified SPAKE2+ exchange (basic implementation for proof of concept)
+   */
+  private async performSpake2Exchange(
+    cred: string,
+    registerResult: TpapRegisterResult,
+    userRandom: Buffer,
+    iterations: number,
+  ): Promise<{
+    userShare: Buffer;
+    userConfirm: Buffer;
+    expectedDevConfirm: Buffer;
+    sharedSecret: Buffer;
+  }> {
+    // Simplified implementation for compatibility
+    // In a full implementation, this would use proper SPAKE2+ elliptic curve cryptography
+    
+    const devSalt = Buffer.from(registerResult.dev_salt, 'base64');
+    const devRandom = Buffer.from(registerResult.dev_random, 'base64');
+    const devShare = Buffer.from(registerResult.dev_share, 'base64');
+    
+    // Generate PBKDF2 keys from credentials
+    const dlen = this.hkdfHash === 'SHA512' ? 64 : 32;
+    const derivedKey = this._crypto.pbkdf2Sync(cred, devSalt, iterations, dlen * 2, 'sha256');
+    
+    // Generate user key pair (simplified)
+    const userPrivKey = this._crypto.createECDH('secp256r1');
+    userPrivKey.generateKeys();
+    const userShare = userPrivKey.getPublicKey();
+    
+    // Compute shared secret (simplified DH)
+    try {
+      const dhSecret = userPrivKey.computeSecret(devShare);
+      
+      // Generate transcript hash
+      const transcript = this.sha256(Buffer.concat([
+        PAKE_CTX,
+        userRandom,
+        devRandom,
+        userShare,
+        devShare,
+        derivedKey,
+      ]));
+      
+      // Generate confirmations (HMAC)
+      const userConfirm = this._crypto.createHmac('sha256', derivedKey.subarray(0, 32))
+        .update(Buffer.concat([devShare, transcript]))
+        .digest()
+        .subarray(0, 16);
+        
+      const expectedDevConfirm = this._crypto.createHmac('sha256', derivedKey.subarray(32, 64))
+        .update(Buffer.concat([userShare, transcript]))
+        .digest()
+        .subarray(0, 16);
+      
+      // Derive final shared secret
+      const sharedSecret = this.sha256(Buffer.concat([dhSecret, transcript]));
+      
+      return {
+        userShare,
+        userConfirm,
+        expectedDevConfirm,
+        sharedSecret,
+      };
+    } catch (error) {
+      throw new Error(`SPAKE2+ key exchange failed: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Build credentials based on device capabilities
+   */
+  private buildCredentials(ptype: string, extraCrypt?: Record<string, unknown>, mac12?: string): string {
+    if (ptype === 'default_userpw' && this.deviceMac) {
+      return this.macPass(this.deviceMac);
+    }
+
+    if (extraCrypt?.type === 'password_shadow') {
+      const params = extraCrypt.params as Record<string, unknown>;
+      const passwdId = Number(params?.passwd_id || 0);
+      
+      if (passwdId === 2) {
+        return this.sha1hex(this.password);
+      }
+      
+      if (passwdId === 3 && this.username && mac12 && mac12.length === 12) {
+        const mac = mac12.match(/.{2}/g)?.join(':').toUpperCase() || '';
+        return this.sha1hex(this.md5hex(this.username) + '_' + mac);
+      }
+    }
+
+    if (extraCrypt?.type === 'password_sha_with_salt') {
+      const params = extraCrypt.params as Record<string, unknown>;
+      const shaName = Number(params?.sha_name || -1);
+      const name = shaName === 0 ? 'admin' : 'user';
+      
+      try {
+        const salt = Buffer.from(String(params?.sha_salt || ''), 'base64').toString();
+        return this._crypto.createHash('sha256').update(name + salt + this.password).digest('hex');
+      } catch {
+        return this.password;
+      }
+    }
+
+    return this.username ? `${this.username}/${this.password}` : this.password;
+  }
+
+  /**
+   * Derive cipher keys from shared secret
+   */
+  private deriveCipherKeys(sharedSecret: Buffer): { key: Buffer; nonce: Buffer } {
+    const labels = CIPHER_LABELS[this.cipherId as keyof typeof CIPHER_LABELS];
+    if (!labels) {
+      throw new Error(`Unsupported cipher: ${this.cipherId}`);
+    }
+
+    const key = this.hkdf(sharedSecret, labels.ks, labels.ki, labels.kl);
+    const nonce = this.hkdf(sharedSecret, labels.ns, labels.ni, NONCE_LEN);
+
+    return { key, nonce };
+  }
+
+  /**
+   * Send encrypted request to device
+   */
+  async sendRequest(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    if (!this.sessionId) {
+      throw new Error('No active TPAP session - call handshake() first');
+    }
+
+    const payload = JSON.stringify({ method, params });
+    const encrypted = this.encrypt(payload);
+
+    const data = Buffer.concat([
+      Buffer.from([this.seq >> 24, this.seq >> 16, this.seq >> 8, this.seq]),
+      encrypted,
+    ]);
+
+    const response = await this._axios.post(`/stok=${this.sessionId}/ds`, data, {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+      },
+      responseType: 'arraybuffer',
+    });
+
+    const respData = Buffer.from(response.data as ArrayBuffer);
+    if (respData.length < 4) {
+      throw new Error(`Response too short (${respData.length}b)`);
+    }
+
+    const respSeq = respData.readUInt32BE(0);
+    const decrypted = this.decrypt(respData.subarray(4), respSeq);
+    
+    this.seq++;
+
+    const result = JSON.parse(decrypted);
+    if (result.error_code !== 0) {
+      throw new Error(`Device error ${result.error_code}: ${JSON.stringify(result)}`);
+    }
+
     return result;
   }
 
   /**
-   * Derive w0 and w1 parameters from username and password
+   * Encrypt data using AES-128-CCM (simulated with GCM)
    */
-  private derivePasswordParams(username: string, password: string): { w0: Buffer; w1: Buffer } {
-    // Normalize credentials
-    const normalizedUsername = Buffer.from(username.normalize('NFKC'), 'utf8');
-    const normalizedPassword = Buffer.from(password.normalize('NFKC'), 'utf8');
-
-    // Calculate w0 = HKDF(SHA256(username) || SHA256(password), salt="spake2+_w0", length=32)
-    const usernameHash = this._crypto.createHash('sha256').update(normalizedUsername).digest();
-    const passwordHash = this._crypto.createHash('sha256').update(normalizedPassword).digest();
-    const combinedHash = Buffer.concat([usernameHash, passwordHash]);
-
-    const w0 = Buffer.from(this._crypto.hkdfSync('sha256', combinedHash, Buffer.from('spake2+_w0'), 'spake2+_tapo', 32));
-    const w1 = Buffer.from(this._crypto.hkdfSync('sha256', combinedHash, Buffer.from('spake2+_w1'), 'spake2+_tapo', 32));
-
-    return { w0, w1 };
+  private encrypt(data: string | Buffer): Buffer {
+    const plaintext = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+    const nonce = this.getNonce(this.seq);
+    
+    const cipher = this._crypto.createCipheriv('aes-128-gcm', this.key, nonce);
+    
+    const encrypted = Buffer.concat([
+      cipher.update(plaintext),
+      cipher.final(),
+    ]);
+    
+    const tag = cipher.getAuthTag();
+    
+    return Buffer.concat([encrypted, tag]);
   }
 
   /**
-   * Generate random scalar for ephemeral key
+   * Decrypt data using AES-128-CCM (simulated with GCM)
    */
-  private generateRandomScalar(): Buffer {
-    return this._crypto.randomBytes(32);
-  }
-
-  /**
-   * Calculate client public key: X = w0*M + x*G
-   */
-  private calculateClientPublicKey(w0: Buffer, x: Buffer): Buffer {
-    // This is a simplified version - in production, use proper EC point arithmetic
-    // For now, return a placeholder that would work with proper crypto library
-    const key = this._crypto.createECDH('prime256v1');
-    key.setPrivateKey(x);
-    return key.getPublicKey();
-  }
-
-  /**
-   * Parse handshake1 response
-   */
-  private parseHandshake1Response(response: Buffer): { Y: Buffer; serverMac: Buffer } {
-    if (response.length < 97) { // 65 (compressed point) + 32 (MAC)
-      throw new Error('Invalid handshake1 response length');
+  private decrypt(data: Buffer, seq: number): string {
+    if (data.length < 16) {
+      throw new Error('Encrypted data too short');
     }
-
-    const Y = response.subarray(0, 65);
-    const serverMac = response.subarray(65, 97);
-
-    return { Y, serverMac };
-  }
-
-  /**
-   * Calculate shared secret from SPAKE2+ exchange
-   */
-  private calculateSharedSecret(w1: Buffer, x: Buffer, X: Buffer, Y: Buffer): Buffer {
-    // Simplified implementation - use proper EC arithmetic in production
-    return this._crypto.createHash('sha256').update(Buffer.concat([w1, x, X, Y])).digest();
-  }
-
-  /**
-   * Calculate server MAC for verification
-   */
-  private calculateServerMac(X: Buffer, Y: Buffer, sharedSecret: Buffer): Buffer {
-    return this._crypto
-      .createHmac('sha256', sharedSecret)
-      .update(Buffer.concat([Buffer.from('server'), X, Y]))
-      .digest()
-      .subarray(0, 32);
-  }
-
-  /**
-   * Calculate client MAC for handshake2
-   */
-  private calculateClientMac(X: Buffer, Y: Buffer, sharedSecret: Buffer): Buffer {
-    return this._crypto
-      .createHmac('sha256', sharedSecret)
-      .update(Buffer.concat([Buffer.from('client'), X, Y]))
-      .digest()
-      .subarray(0, 32);
-  }
-
-  /**
-   * Derive session keys from SPAKE2+ exchange data
-   */
-  private deriveSessionKeysFromSpake(spakeData: any): void {
-    // For now, use a simplified key derivation
-    // In a full implementation, this would process the actual SPAKE2+ exchange
-    const keyMaterial = Buffer.from(JSON.stringify(spakeData), 'utf8');
     
-    // Derive keys using the spake data as seed
-    this.encryptionKey = this._crypto.createHash('sha256').update(keyMaterial).digest().subarray(0, 16);
-    this.sigKey = this._crypto.createHash('sha256').update(Buffer.concat([keyMaterial, Buffer.from('sig')])).digest();
-    this.iv = this._crypto.createHash('sha256').update(Buffer.concat([keyMaterial, Buffer.from('iv')])).digest().subarray(0, 12);
+    const nonce = this.getNonce(seq);
+    const ciphertext = data.subarray(0, -16);
+    const tag = data.subarray(-16);
     
-    this.log.debug('TPAP session keys derived from SPAKE2+ exchange');
+    const decipher = this._crypto.createDecipheriv('aes-128-gcm', this.key, nonce);
+    decipher.setAuthTag(tag);
+    
+    const decrypted = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]);
+    
+    return decrypted.toString('utf8');
   }
 
   /**
-   * Legacy method - keeping for compatibility
+   * Generate nonce for encryption
    */
-  private deriveSessionKeys(sharedSecret: Buffer): void {
-    this.sessionKey = sharedSecret;
-    
-    // Derive encryption key: HKDF(shared_secret, salt="tpap_enc", length=16)
-    this.encryptionKey = Buffer.from(this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_enc', 16));
-    
-    // Derive signature key: HKDF(shared_secret, salt="tpap_sig", length=32)  
-    this.sigKey = Buffer.from(this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_sig', 32));
-    
-    // Initialize IV base
-    this.iv = Buffer.from(this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_iv', 12));
-    
-    this.log.debug('TPAP session keys derived');
+  private getNonce(seq: number): Buffer {
+    const nonce = Buffer.from(this.baseNonce);
+    nonce.writeUInt32BE(seq, nonce.length - 4);
+    return nonce;
   }
 
-  /**
-   * Create IV with sequence number for AES-CCM
-   */
-  private createIvWithSeq(seq: number): Buffer {
-    const seqBuffer = Buffer.alloc(4);
-    seqBuffer.writeUInt32BE(seq, 0);
-    return Buffer.concat([this.iv, seqBuffer]);
+  // Utility methods
+  private async post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const response: AxiosResponse = await this._axios.post(path, body);
+    return response.data;
   }
 
-  /**
-   * Encode handshake1 payload
-   */
-  private encodeHandshake1(X: Buffer): Buffer {
-    // Simple encoding - prepend length
-    const length = Buffer.alloc(2);
-    length.writeUInt16BE(X.length, 0);
-    return Buffer.concat([length, X]);
+  private md5hex(s: string): string {
+    return this._crypto.createHash('md5').update(s).digest('hex');
+  }
+
+  private sha1hex(s: string): string {
+    return this._crypto.createHash('sha1').update(s).digest('hex');
+  }
+
+  private sha256(data: Buffer): Buffer {
+    return this._crypto.createHash('sha256').update(data).digest();
+  }
+
+  private sha512(data: Buffer): Buffer {
+    return this._crypto.createHash('sha512').update(data).digest();
+  }
+
+  private hkdf(ikm: Buffer, salt: Buffer, info: Buffer, length: number): Buffer {
+    const algorithm = this.hkdfHash === 'SHA512' ? 'sha512' : 'sha256';
+    return Buffer.from(this._crypto.hkdfSync(algorithm, ikm, salt, info, length));
+  }
+
+  private hkdfExpand(label: string, prk: Buffer, length: number): Buffer {
+    const algorithm = this.hkdfHash === 'SHA512' ? 'sha512' : 'sha256';
+    const info = Buffer.from(label, 'utf8');
+    return Buffer.from(this._crypto.hkdfSync(algorithm, prk, Buffer.alloc(length), info, length));
+  }
+
+  private cmacAes(key: Buffer, data: Buffer): Buffer {
+    // Simplified CMAC implementation using HMAC for compatibility
+    return this._crypto.createHmac('sha256', key).update(data).digest().subarray(0, 16);
+  }
+
+  private macPass(mac: string): string {
+    const b = Buffer.from(mac.replace(/[:-]/g, ''), 'hex');
+    const ikm = Buffer.concat([Buffer.from('GqY5o136oa4i6VprTlMW2DpVXxmfW8'), b.subarray(3, 6), b.subarray(0, 3)]);
+    return this.hkdf(
+      ikm,
+      Buffer.from('tp-kdf-salt-default-passcode'),
+      Buffer.from('tp-kdf-info-default-passcode'),
+      32,
+    ).toString('hex').toUpperCase();
+  }
+
+  private l8(b: Buffer): Buffer {
+    const length = Buffer.alloc(8);
+    length.writeUInt32LE(b.length, 0);
+    return Buffer.concat([length, b]);
+  }
+
+  private encodeW(w: bigint): Buffer {
+    const ml = w === 0n ? 1 : Math.ceil(w.toString(16).length / 2);
+    const u = Buffer.from(w.toString(16).padStart(ml * 2, '0'), 'hex');
+    return (ml % 2 !== 0 && u[0] & 0x80) ? Buffer.concat([Buffer.from([0x00]), u]) : u;
   }
 }

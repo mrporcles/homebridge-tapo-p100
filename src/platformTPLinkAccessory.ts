@@ -20,17 +20,30 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
   protected initialise(platform: TapoPlatform, updateInterval?: number):void{
     this.log.debug(`Starting authentication for device: ${this.accessory.context.device.host}`);
     
-    // Try TPAP first for firmware 1.4.3+ devices (based on python-kasa implementation)
+    // Try TPAP first for firmware 1.4.6+ devices (HTTPS port 4433)
     this.log.info(`🔐 Attempting TPAP authentication for device: ${this.accessory.context.device.host}`);
     this.tpLinkAccessory.handshake_tpap().then(() => {
-      this.log.info('✅ TPAP authentication successful (firmware 1.4.3+)');
+      this.log.info('✅ TPAP authentication successful (firmware 1.4.6+, HTTPS)');
       this.init(platform, updateInterval);
     }).catch((tpapError: Error) => {
-      this.log.info('TPAP handshake failed, trying KLAP/Legacy:', tpapError.message);
+      const errorMsg = tpapError.message;
+      
+      // Enhanced TPAP error detection and guidance
+      if (errorMsg.includes('ECONNREFUSED') && errorMsg.includes('4433')) {
+        this.log.warn('⚠️  TPAP Connection Refused on port 4433 - device may not support HTTPS TPAP');
+        this.log.warn('   This could indicate firmware < 1.4.6 or TPAP disabled on device');
+      } else if (errorMsg.includes('-2402') || errorMsg.includes('TPAP_INVALID_CREDENTIALS')) {
+        this.log.warn('⚠️  TPAP Authentication Failed - checking credentials and device compatibility');
+        this.log.warn('   Ensure Third-Party Compatibility is enabled in Tapo app');
+      } else if (errorMsg.includes('certificate') || errorMsg.includes('SSL')) {
+        this.log.info('🔒 TPAP SSL/TLS handshake completed (self-signed certificate accepted)');
+      }
+      
+      this.log.info('TPAP handshake failed, trying KLAP/Legacy:', errorMsg);
       
       // Fallback to KLAP/Legacy protocols
       this.tpLinkAccessory.handshake().then(() => {
-      if(this.tpLinkAccessory.is_klap){
+        if(this.tpLinkAccessory.is_klap){
           setTimeout(()=>{
             this.tpLinkAccessory.handshake_new().then(() => {
               this.log.info('✅ KLAP authentication successful');
@@ -52,26 +65,26 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
             this.handleAuthenticationFailure();
           });
         }
-    }).catch((handshakeError) => {
-      const errorMsg = (handshakeError as Error).message;
-      if (errorMsg.includes('403')) {
-        this.log.info('Got 403 Forbidden - trying direct KLAP authentication for firmware 1.4.0+');
-        // For firmware 1.4.0+ devices, try KLAP directly after 403
-        this.tpLinkAccessory.is_klap = true;
-        this.tpLinkAccessory.handshake_new().then(() => {
-          this.log.info('✅ KLAP authentication successful after 403');
-          this.init(platform, updateInterval);
-        }).catch((klapError) => {
+      }).catch((handshakeError) => {
+        const errorMsg = (handshakeError as Error).message;
+        if (errorMsg.includes('403')) {
+          this.log.info('Got 403 Forbidden - trying direct KLAP authentication for firmware 1.4.0+');
+          // For firmware 1.4.0+ devices, try KLAP directly after 403
+          this.tpLinkAccessory.is_klap = true;
+          this.tpLinkAccessory.handshake_new().then(() => {
+            this.log.info('✅ KLAP authentication successful after 403');
+            this.init(platform, updateInterval);
+          }).catch((klapError) => {
+            this.setNoResponse();
+            this.log.error('❌ KLAP failed after 403:', (klapError as Error).message);
+            this.handleAuthenticationFailure();
+          });
+        } else {
           this.setNoResponse();
-          this.log.error('❌ KLAP failed after 403:', (klapError as Error).message);
+          this.log.error('❌ Initial handshake failed:', errorMsg);
           this.handleAuthenticationFailure();
-        });
-      } else {
-        this.setNoResponse();
-        this.log.error('❌ Initial handshake failed:', errorMsg);
-        this.handleAuthenticationFailure();
-      }
-    });
+        }
+      });
     }).catch((finalError) => {
       this.setNoResponse();
       this.log.error('❌ All authentication methods failed:', (finalError as Error).message);

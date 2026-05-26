@@ -6,6 +6,7 @@ import TpLinkCipher from './tpLinkCipher.js';
 import { v4 as uuidv4 } from 'uuid';
 import { AxiosResponse } from 'axios';
 import NewTpLinkCipher from './newTpLinkCipher.js';
+import TpapCipher from './tpapCipher.js';
 import { TpLinkAccessory } from './tplinkAccessory.js';
 import axios from 'axios';
 import crypto from 'crypto';
@@ -17,6 +18,7 @@ export default class P100 implements TpLinkAccessory{
   protected _axios = axios;
   private _utf8 = utf8;
   public is_klap = true;
+  public is_tpap = false;
 
   private encodedPassword!: string;
   private encodedEmail!: string;
@@ -33,6 +35,7 @@ export default class P100 implements TpLinkAccessory{
 
   protected tpLinkCipher!: TpLinkCipher;
   protected newTpLinkCipher!: NewTpLinkCipher;
+  protected tpapCipher!: TpapCipher;
 
   protected ERROR_CODES = {
     '0': 'Success',
@@ -84,6 +87,7 @@ export default class P100 implements TpLinkAccessory{
     '-2301': 'ERR_DST',
     '-2302': 'ERR_DST_SAVE',
     '1003': 'KLAP',
+    '1004': 'TPAP_REQUIRED',
   };
 
   constructor(
@@ -143,6 +147,21 @@ export default class P100 implements TpLinkAccessory{
     this.privateKey = privateKey;
     //@ts-ignore
     this.publicKey = publicKey.toString('utf8');
+  }
+
+  //TPAP (firmware 1.4.0+) handshake
+  async handshake_tpap(): Promise<void> {
+    this.log.debug('Trying TPAP/SPAKE2+ handshake');
+
+    try {
+      this.tpapCipher = new TpapCipher(this.log);
+      await this.tpapCipher.handshake(this.ip, this.email, this.password, this.raw_request.bind(this));
+      this.is_tpap = true;
+      this.log.debug('TPAP handshake successful');
+    } catch (error) {
+      this.is_tpap = false;
+      throw error;
+    }
   }
 
   //old tapo requests
@@ -438,6 +457,64 @@ export default class P100 implements TpLinkAccessory{
           this.log.error('371 Error: ' + error.message);
           throw new Error('Get device info failed: ' + (error instanceof Error ? error.message : String(error)));
         });
+    } else if (this.tpapCipher) {
+      const data = this.tpapCipher.encrypt(payload);
+
+      const URL = 'http://' + this.ip + '/app/' + 'request';
+      const headers = {
+        'Connection': 'Keep-Alive',
+        Host: this.ip,
+        Accept: '*/*',
+        'Content-Type': 'application/octet-stream',
+      };
+
+      if (this.cookie) {
+        //@ts-ignore
+        headers.Cookie = this.cookie;
+      }
+
+      const config = {
+        timeout: 5000,
+        responseType: 'arraybuffer',
+        headers: headers,
+        params: { seq: data.seq.toString() },
+      };
+      //@ts-ignore
+      return this._axios.post(URL, data.encryptedPayload, config)
+        .then((res: AxiosResponse) => {
+          if (res.data.error_code) {
+            return this.handleError(res.data.error_code, '309');
+          }
+
+          try {
+            if (res.headers && res.headers['set-cookie']) {
+              this.cookie = res.headers['set-cookie'][0].split(';')[0];
+            }
+
+            const response = JSON.parse(this.tpapCipher.decrypt(res.data));
+
+            if (response.error_code !== 0) {
+              return this.handleError(response.error_code, '333');
+            }
+            this.setSysInfo(response.result);
+            this.log.debug('Device Info: ', response.result);
+
+            return this.getSysInfo();
+          } catch (error) {
+            this.log.debug(this.tpapCipher.decrypt(res.data));
+            this.log.debug('Status: ' + res.status);
+            return this.handleError(res.data.error_code, '480');
+          }
+        })
+        .catch((error: Error) => {
+          this.log.debug('469 Error: ' + JSON.stringify(error) + ', on ip: ' + this.ip);
+          this.log.error('469 Error: ' + error.message + ', on ip: ' + this.ip);
+          if(error.message && error.message.indexOf('403') > -1){
+            this.reAuthenticate();
+          }
+          throw new Error('Get device info TPAP failed: ' + (error instanceof Error ? error.message : String(error)));
+        });
+
     } else if (this.newTpLinkCipher) {
       const data = this.newTpLinkCipher.encrypt(payload);
 
@@ -564,9 +641,14 @@ export default class P100 implements TpLinkAccessory{
   protected handleError(errorCode: number | string, line: string): boolean {
     //@ts-ignore
     const errorMessage = this.ERROR_CODES[errorCode];
-    if (typeof errorCode === 'number' && errorCode === 1003) {
+    if (typeof errorCode === 'number' && errorCode === 1004) {
+      this.log.info('Trying TPAP Auth');
+      this.is_tpap = true;
+      this.is_klap = false;
+    } else if (typeof errorCode === 'number' && errorCode === 1003) {
       this.log.info('Trying KLAP Auth');
       this.is_klap = true;
+      this.is_tpap = false;
     } else{
       this.log.error(line + ' Error Code: ' + errorCode + ', ' + errorMessage + ' ' + this.ip);
     }
@@ -589,19 +671,35 @@ export default class P100 implements TpLinkAccessory{
         return false;
       });
     } else {
-      return this.handleKlapRequest(payload).then((result) => {
-        return result ? true : false;
-      }).catch((error) => {
-        if (error.message && error.message.indexOf('9999') > 0 && this._reconnect_counter <= 3) {
-          return this.newReconnect().then(() => {
-            return this.handleKlapRequest(payload);
-          }).then((result) => {
-            return result ? true : false;
-          }).catch(() => false);
-        }
-        this._reconnect_counter = 0;
-        return false;
-      });
+      if (this.is_tpap) {
+        return this.handleTpapRequest(payload).then((result) => {
+          return result ? true : false;
+        }).catch((error) => {
+          if (error.message && error.message.indexOf('9999') > 0 && this._reconnect_counter <= 3) {
+            return this.tpapReconnect().then(() => {
+              return this.handleTpapRequest(payload);
+            }).then((result) => {
+              return result ? true : false;
+            }).catch(() => false);
+          }
+          this._reconnect_counter = 0;
+          return false;
+        });
+      } else {
+        return this.handleKlapRequest(payload).then((result) => {
+          return result ? true : false;
+        }).catch((error) => {
+          if (error.message && error.message.indexOf('9999') > 0 && this._reconnect_counter <= 3) {
+            return this.newReconnect().then(() => {
+              return this.handleKlapRequest(payload);
+            }).then((result) => {
+              return result ? true : false;
+            }).catch(() => false);
+          }
+          this._reconnect_counter = 0;
+          return false;
+        });
+      }
     }
   }
 
@@ -664,6 +762,38 @@ export default class P100 implements TpLinkAccessory{
     });
   }
 
+  protected handleTpapRequest(payload: string): Promise<any> {
+    if (this.tpapCipher) {
+      const data = this.tpapCipher.encrypt(payload);
+
+      return this.raw_request('request', data.encryptedPayload, 'arraybuffer', { seq: data.seq.toString() }).then((res) => {
+        return JSON.parse(this.tpapCipher.decrypt(res));
+      }).catch(async (error: Error) => {
+        if (error.message.indexOf('403') > -1) {
+          this.log.info('Got 403, re-authenticating TPAP and retrying...');
+          try {
+            await this.tpapReconnect();
+            this.log.info('TPAP re-authenticated, retrying request...');
+            if (!this.tpapCipher) {
+              throw new Error('TPAP cipher not initialized after reconnect');
+            }
+            const retryData = this.tpapCipher.encrypt(payload);
+            const retryRes = await this.raw_request('request', retryData.encryptedPayload, 'arraybuffer',
+              { seq: retryData.seq.toString() });
+            return JSON.parse(this.tpapCipher.decrypt(retryRes));
+          } catch (retryError) {
+            this.log.error('TPAP retry after 403 failed: ' + (retryError instanceof Error ? retryError.message : String(retryError)));
+            throw retryError instanceof Error ? retryError : new Error(String(retryError));
+          }
+        }
+        throw error instanceof Error ? error : new Error(String(error));
+      });
+    }
+    return new Promise<true>((resolve, reject) => {
+      reject(new Error('TPAP cipher not initialized'));
+    });
+  }
+
   protected handleKlapRequest(payload: string): Promise<any> {
     if (this.newTpLinkCipher) {
       const data = this.newTpLinkCipher.encrypt(payload);
@@ -713,13 +843,30 @@ export default class P100 implements TpLinkAccessory{
     });
   }
 
+  protected async tpapReconnect(): Promise<void> {
+    this._reconnect_counter++;
+    return this.handshake_tpap().then(() => {
+      return;
+    });
+  }
+
   private reAuthenticate():void{
-    if(this.is_klap){
+    if(this.is_tpap){
+      this.handshake_tpap().then(() => {
+        this.log.info('TPAP Authenticated successfully');
+      }).catch(() => {
+        this.log.error('TPAP Handshake failed');
+        this.is_tpap = false;
+        this.is_klap = true; // Fallback to KLAP
+        this.reAuthenticate();
+      });
+    } else if(this.is_klap){
       this.handshake_new().then(() => {
         this.log.info('KLAP Authenticated successfully');
       }).catch(() => {
         this.log.error('KLAP Handshake failed');
         this.is_klap = false;
+        this.reAuthenticate(); // Fallback to legacy
       });
     } else {
       this.handshake().then(() => {

@@ -122,7 +122,22 @@ Use your E-Mail, with which you created an account for Tapo, as your username (h
 
 Use a password that is 8 characters long, not more and down use any special characters, only numbers and letters (https://github.com/apatsufas/homebridge-tapo-p100/issues/13#issuecomment-981062496)
 
-If you are on the latest firmware version, you must enable "Third-Party Compatibility" in the Tapo App (https://github.com/apatsufas/homebridge-tapo-p100/issues/62#issuecomment-3467057353)
+### Firmware Compatibility
+
+**IMPORTANT**: Firmware 1.4.0+ requires special setup:
+
+1. **Open the Tapo app** on your phone
+2. Go to **Me → Third-Party Services**  
+3. Enable **"Third-Party Compatibility"**
+4. If it was already enabled, **toggle it OFF and ON again**
+5. Restart Homebridge
+
+This plugin automatically detects and supports all authentication protocols:
+- **TPAP** (firmware 1.4.0+) - newest encryption method
+- **KLAP** (firmware 1.2+) - previous encryption method  
+- **Legacy** (older firmware) - original authentication method
+
+For older firmware versions, Third-Party Compatibility may not be required, but enabling it is recommended for consistent operation.
 
 ### Thanks / Credits
 

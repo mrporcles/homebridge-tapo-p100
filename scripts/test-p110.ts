@@ -46,19 +46,33 @@ async function testP110(ip: string, email: string, password: string) {
 
   const p110 = new P110(log, ip, email, password, 5);
 
-  console.log('Initializing (KLAP handshake)...');
+  console.log('Initializing (trying TPAP first for firmware 1.4.0+)...');
   try {
-    await p110.handshake_new();
-    console.log('✓ KLAP handshake successful');
+    await p110.handshake_tpap();
+    console.log('✓ TPAP handshake successful (firmware 1.4.0+)');
   } catch (error) {
-    console.log('✗ KLAP handshake failed:', error);
-    console.log('Trying old handshake protocol...');
+    console.log('✗ TPAP handshake failed:', (error as Error).message);
+    console.log('Trying KLAP handshake...');
     try {
-      await p110.handshake();
-      console.log('✓ Old handshake successful');
+      await p110.handshake_new();
+      console.log('✓ KLAP handshake successful');
     } catch (error2) {
-      console.log('✗ Old handshake also failed:', error2);
-      return;
+      console.log('✗ KLAP handshake failed:', (error2 as Error).message);
+      console.log('Trying old handshake protocol...');
+      try {
+        await p110.handshake();
+        await p110.login();
+        console.log('✓ Old handshake successful');
+      } catch (error3) {
+        console.log('✗ All handshake methods failed:', (error3 as Error).message);
+        console.log('');
+        console.log('❗ For firmware 1.4.0+, please ensure:');
+        console.log('   1. Open the Tapo app');
+        console.log('   2. Go to Me → Third-Party Services');
+        console.log('   3. Enable "Third-Party Compatibility"');
+        console.log('   4. Toggle it OFF and ON again if already enabled');
+        return;
+      }
     }
   }
 

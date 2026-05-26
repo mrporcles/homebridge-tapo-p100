@@ -24,7 +24,23 @@ export default class P110 extends P100 {
         '"requestTimeMils": ' + Math.round(Date.now() * 1000) + ''+
         '};';
      
-    if(this.is_klap){
+    if(this.is_tpap){
+      return this.handleTpapRequest(payload).then((response)=>{
+        if(response && response.result){
+          this._consumption = {
+            current: Math.ceil(response.result.current_power / 1000),
+            total: response.result.today_energy / 1000,
+          };
+        } else{
+          this._consumption = {
+            current: 0,
+            total: 0,
+          };
+        }
+           
+        return response.result;
+      });
+    } else if(this.is_klap){
       return this.handleKlapRequest(payload).then((response)=>{
         if(response && response.result){
           this._consumption = {

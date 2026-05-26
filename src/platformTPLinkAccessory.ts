@@ -18,43 +18,72 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
   }
 
   protected initialise(platform: TapoPlatform, updateInterval?: number):void{
-    // Try TPAP first (firmware 1.4.0+)
-    this.tpLinkAccessory.handshake_tpap().then(() => {
-      this.log.info('TPAP authentication successful');
-      this.init(platform, updateInterval);
-    }).catch((tpapError: Error) => {
-      this.log.debug('TPAP handshake failed, trying KLAP:', tpapError.message);
-      // Fallback to KLAP/Legacy
-      this.tpLinkAccessory.handshake().then(() => {
-        if(this.tpLinkAccessory.is_klap){
+    this.log.debug(`Starting authentication for device: ${this.accessory.context.device.host}`);
+    
+    // Note: TPAP implementation temporarily disabled - requires complete SPAKE2+ crypto implementation
+    // For firmware 1.4.0+, enable "Third-Party Compatibility" in Tapo app to use KLAP/Legacy protocols
+    this.tpLinkAccessory.handshake().then(() => {
+      if(this.tpLinkAccessory.is_klap){
           setTimeout(()=>{
             this.tpLinkAccessory.handshake_new().then(() => {
+              this.log.info('✅ KLAP authentication successful');
               this.init(platform, updateInterval);
-            }).catch(() => {
+            }).catch((klapError) => {
               this.setNoResponse();
-              this.log.error('KLAP Handshake failed');
+              this.log.error('❌ KLAP Handshake failed:', (klapError as Error).message);
+              this.handleAuthenticationFailure();
               this.tpLinkAccessory.is_klap = false;
             });
           }, 100);
         } else{
           this.tpLinkAccessory.login().then(() => {
+            this.log.info('✅ Legacy authentication successful');
             this.init(platform, updateInterval);
-          }).catch(() => {
+          }).catch((legacyError) => {
             this.setNoResponse();
-            this.log.error('Login failed');
+            this.log.error('❌ Legacy login failed:', (legacyError as Error).message);
+            this.handleAuthenticationFailure();
           });
         }
-      }).catch(() => {
+    }).catch((handshakeError) => {
+      const errorMsg = (handshakeError as Error).message;
+      if (errorMsg.includes('403')) {
+        this.log.info('Got 403 Forbidden - trying direct KLAP authentication for firmware 1.4.0+');
+        // For firmware 1.4.0+ devices, try KLAP directly after 403
+        this.tpLinkAccessory.is_klap = true;
+        this.tpLinkAccessory.handshake_new().then(() => {
+          this.log.info('✅ KLAP authentication successful after 403');
+          this.init(platform, updateInterval);
+        }).catch((klapError) => {
+          this.setNoResponse();
+          this.log.error('❌ KLAP failed after 403:', (klapError as Error).message);
+          this.handleAuthenticationFailure();
+        });
+      } else {
         this.setNoResponse();
-        this.log.error('All authentication methods failed for device: ' + this.accessory.context.device.host);
-        this.log.error('If your device has firmware 1.4.0+, please:');
-        this.log.error('1. Open the Tapo app');
-        this.log.error('2. Go to Me → Third-Party Services');
-        this.log.error('3. Enable "Third-Party Compatibility"');
-        this.log.error('4. Toggle it OFF and ON again if it was already enabled');
-        this.log.error('5. Restart Homebridge and try again');
-      });
+        this.log.error('❌ Initial handshake failed:', errorMsg);
+        this.handleAuthenticationFailure();
+      }
     });
+  }
+
+  private handleAuthenticationFailure(): void {
+    const deviceHost = this.accessory.context.device.host;
+    this.log.error(`🚫 All authentication methods failed for device: ${deviceHost}`);
+    this.log.error('');
+    this.log.error('📱 For firmware 1.4.0+ devices (HTTP 403 Forbidden errors):');
+    this.log.error('   🔧 Third-Party Compatibility Setup:');
+    this.log.error('   1. Open Tapo app → Select this device');
+    this.log.error('   2. Settings → Advanced Settings');
+    this.log.error('   3. Find "Third-Party Compatibility" and enable it');
+    this.log.error('   4. If already enabled: toggle OFF, wait 10 sec, toggle ON');
+    this.log.error('   5. Power cycle the device (unplug for 10 seconds)');
+    this.log.error('   6. Wait 2 minutes, then restart Homebridge');
+    this.log.error('');
+    this.log.error('📡 Additional troubleshooting:');
+    this.log.error('   - Ensure device firmware is up to date');
+    this.log.error('   - Try factory reset if Third-Party Compatibility option missing');
+    this.log.error('   - Verify correct IP address: ' + deviceHost);
   }
 
   protected abstract init(platform: TapoPlatform, updateInterval?: number):void;

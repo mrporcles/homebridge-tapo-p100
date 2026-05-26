@@ -151,15 +151,21 @@ export default class P100 implements TpLinkAccessory{
 
   //TPAP (firmware 1.4.0+) handshake
   async handshake_tpap(): Promise<void> {
-    this.log.debug('Trying TPAP/SPAKE2+ handshake');
+    this.log.debug('🔐 Attempting TPAP/SPAKE2+ handshake for firmware 1.4.0+');
 
     try {
       this.tpapCipher = new TpapCipher(this.log);
       await this.tpapCipher.handshake(this.ip, this.email, this.password, this.raw_request.bind(this));
       this.is_tpap = true;
-      this.log.debug('TPAP handshake successful');
+      this.log.info('✅ TPAP handshake successful - using latest encryption');
     } catch (error) {
       this.is_tpap = false;
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (errorMsg.includes('400') || errorMsg.includes('403')) {
+        this.log.debug('📱 Device does not support TPAP (likely older firmware) - will try KLAP/Legacy');
+      } else {
+        this.log.debug('❌ TPAP handshake failed:', errorMsg);
+      }
       throw error;
     }
   }
@@ -307,6 +313,7 @@ export default class P100 implements TpLinkAccessory{
       .catch((error: Error) => {
         this.log.error('276 Error: ' + error.message + ', on ip: ' + this.ip);
         if(error.message && error.message.indexOf('403') > -1){
+          this.log.info('Got 403 Forbidden - attempting re-authentication for firmware 1.4.0+');
           this.reAuthenticate();
         }
         throw new Error('Request failed: ' + (error instanceof Error ? error.message : String(error)));
@@ -641,7 +648,11 @@ export default class P100 implements TpLinkAccessory{
   protected handleError(errorCode: number | string, line: string): boolean {
     //@ts-ignore
     const errorMessage = this.ERROR_CODES[errorCode];
-    if (typeof errorCode === 'number' && errorCode === 1004) {
+    if (typeof errorCode === 'number' && errorCode === 403) {
+      this.log.info('HTTP 403 Forbidden - device requires proper authentication (firmware 1.4.0+)');
+      this.is_klap = true; // Try KLAP for 403 errors
+      return false;
+    } else if (typeof errorCode === 'number' && errorCode === 1004) {
       this.log.info('Trying TPAP Auth');
       this.is_tpap = true;
       this.is_klap = false;

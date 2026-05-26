@@ -21,11 +21,12 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
     this.log.debug(`Starting authentication for device: ${this.accessory.context.device.host}`);
     
     // Try TPAP first for firmware 1.4.3+ devices (based on python-kasa implementation)
+    this.log.info(`🔐 Attempting TPAP authentication for device: ${this.accessory.context.device.host}`);
     this.tpLinkAccessory.handshake_tpap().then(() => {
       this.log.info('✅ TPAP authentication successful (firmware 1.4.3+)');
       this.init(platform, updateInterval);
     }).catch((tpapError: Error) => {
-      this.log.debug('TPAP handshake failed, trying KLAP/Legacy:', tpapError.message);
+      this.log.info('TPAP handshake failed, trying KLAP/Legacy:', tpapError.message);
       
       // Fallback to KLAP/Legacy protocols
       this.tpLinkAccessory.handshake().then(() => {

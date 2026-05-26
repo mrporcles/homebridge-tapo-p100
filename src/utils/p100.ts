@@ -151,7 +151,7 @@ export default class P100 implements TpLinkAccessory{
 
   //TPAP (firmware 1.4.0+) handshake
   async handshake_tpap(): Promise<void> {
-    this.log.debug('🔐 Attempting TPAP/SPAKE2+ handshake for firmware 1.4.0+');
+    this.log.info('🔐 [TPAP] Starting TPAP/SPAKE2+ handshake for firmware 1.4.0+');
 
     try {
       this.tpapCipher = new TpapCipher(this.log);
@@ -183,7 +183,7 @@ export default class P100 implements TpLinkAccessory{
     this.log.debug('Handshake P100 on host: ' + this.ip);
 
     const headers = {
-      'Connection': 'close',
+      'Connection': 'Keep-Alive',
     };
     const config = {
       timeout: 5000,
@@ -228,7 +228,7 @@ export default class P100 implements TpLinkAccessory{
 
     const headers = {
       'Cookie': this.cookie,
-      'Connection': 'close',
+      'Connection': 'Keep-Alive',
     };
 
     if (this.tpLinkCipher) {
@@ -274,7 +274,7 @@ export default class P100 implements TpLinkAccessory{
     const URL = 'http://' + this.ip + '/app/' + path;
 
     const headers = {
-      'Connection': 'close', // Use close instead of keep-alive for firmware 1.4.0+ compatibility
+      'Connection': 'Keep-Alive', // Use close instead of keep-alive for firmware 1.4.0+ compatibility
       Host: this.ip,
       Accept: '*/*',
       'Content-Type': 'application/octet-stream',
@@ -469,7 +469,7 @@ export default class P100 implements TpLinkAccessory{
 
       const URL = 'http://' + this.ip + '/app/' + 'request';
       const headers = {
-        'Connection': 'close',
+        'Connection': 'Keep-Alive',
         Host: this.ip,
         Accept: '*/*',
         'Content-Type': 'application/octet-stream',
@@ -527,7 +527,7 @@ export default class P100 implements TpLinkAccessory{
 
       const URL = 'http://' + this.ip + '/app/' + 'request';
       const headers = {
-        'Connection': 'close',
+        'Connection': 'Keep-Alive',
         Host: this.ip,
         Accept: '*/*',
         'Content-Type': 'application/octet-stream',
@@ -719,7 +719,7 @@ export default class P100 implements TpLinkAccessory{
 
     const headers = {
       'Cookie': this.cookie,
-      'Connection': 'close',
+      'Connection': 'Keep-Alive',
     };
 
     if (this.tpLinkCipher) {
@@ -843,7 +843,7 @@ export default class P100 implements TpLinkAccessory{
     const URL = `http://${this.ip}/` + (path || '');
 
     const headers = {
-      'Connection': 'close',
+      'Connection': 'Keep-Alive',
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };

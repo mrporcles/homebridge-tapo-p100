@@ -22,7 +22,7 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
     this.tpLinkAccessory.handshake_tpap().then(() => {
       this.log.info('TPAP authentication successful');
       this.init(platform, updateInterval);
-    }).catch((tpapError) => {
+    }).catch((tpapError: Error) => {
       this.log.debug('TPAP handshake failed, trying KLAP:', tpapError.message);
       // Fallback to KLAP/Legacy
       this.tpLinkAccessory.handshake().then(() => {

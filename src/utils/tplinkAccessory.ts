@@ -4,12 +4,15 @@ import { PowerUsage } from './powerUsage.js';
 
 export interface TpLinkAccessory{
     is_klap:boolean;
+    is_tpap:boolean;
 
     handshake(): Promise<void>;
 
     login(): Promise<void>;
 
     handshake_new(): Promise<void>;
+
+    handshake_tpap(): Promise<void>;
 
     turnOff(): Promise<boolean>;
 

@@ -45,16 +45,16 @@ export default class TpapCipher {
     ipAddress: string,
     username: string,
     password: string,
-    rawRequest: (path: string, data: Buffer, responseType: string) => Promise<any>
+    rawRequest: (path: string, data: Buffer, responseType: string) => Promise<Buffer>,
   ): Promise<void> {
     this.log.debug('Starting TPAP/SPAKE2+ handshake');
 
-    // Step 1: Generate ephemeral key pair
-    const keyPair = this._crypto.generateKeyPairSync('ec', {
-      namedCurve: 'prime256v1',
-      publicKeyEncoding: { type: 'spki', format: 'der' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'der' },
-    });
+    // Step 1: Generate ephemeral key pair (for future use in full implementation)
+    // const keyPair = this._crypto.generateKeyPairSync('ec', {
+    //   namedCurve: 'prime256v1',  
+    //   publicKeyEncoding: { type: 'spki', format: 'der' },
+    //   privateKeyEncoding: { type: 'pkcs8', format: 'der' },
+    // });
 
     // Step 2: Calculate w0 and w1 from password
     const { w0, w1 } = this.derivePasswordParams(username, password);
@@ -81,7 +81,7 @@ export default class TpapCipher {
     const clientMac = this.calculateClientMac(X, Y, sharedSecret);
     const response2 = await rawRequest('handshake2', clientMac, 'text');
 
-    if (response2 !== 'ok') {
+    if (response2.toString() !== 'ok') {
       throw new Error('TPAP handshake failed: Handshake2 not acknowledged');
     }
 
@@ -184,8 +184,8 @@ export default class TpapCipher {
     const passwordHash = this._crypto.createHash('sha256').update(normalizedPassword).digest();
     const combinedHash = Buffer.concat([usernameHash, passwordHash]);
 
-    const w0 = this._crypto.hkdfSync('sha256', combinedHash, Buffer.from('spake2+_w0'), 'spake2+_tapo', 32);
-    const w1 = this._crypto.hkdfSync('sha256', combinedHash, Buffer.from('spake2+_w1'), 'spake2+_tapo', 32);
+    const w0 = Buffer.from(this._crypto.hkdfSync('sha256', combinedHash, Buffer.from('spake2+_w0'), 'spake2+_tapo', 32));
+    const w1 = Buffer.from(this._crypto.hkdfSync('sha256', combinedHash, Buffer.from('spake2+_w1'), 'spake2+_tapo', 32));
 
     return { w0, w1 };
   }
@@ -259,13 +259,13 @@ export default class TpapCipher {
     this.sessionKey = sharedSecret;
     
     // Derive encryption key: HKDF(shared_secret, salt="tpap_enc", length=16)
-    this.encryptionKey = this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_enc', 16);
+    this.encryptionKey = Buffer.from(this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_enc', 16));
     
     // Derive signature key: HKDF(shared_secret, salt="tpap_sig", length=32)  
-    this.sigKey = this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_sig', 32);
+    this.sigKey = Buffer.from(this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_sig', 32));
     
     // Initialize IV base
-    this.iv = this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_iv', 12);
+    this.iv = Buffer.from(this._crypto.hkdfSync('sha256', sharedSecret, Buffer.alloc(0), 'tpap_iv', 12));
     
     this.log.debug('TPAP session keys derived');
   }

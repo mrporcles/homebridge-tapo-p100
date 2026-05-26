@@ -81,7 +81,7 @@ export default class TpapCipher {
   private key: Buffer = Buffer.alloc(0);
   private baseNonce: Buffer = Buffer.alloc(0);
 
-  constructor(host: string, username: string, password: string, log: Logger, port: number = 4433) {
+  constructor(host: string, username: string, password: string, log: Logger, port: number = 443) {
     this._crypto = crypto;
     this.log = log;
     this.host = host;
@@ -107,7 +107,7 @@ export default class TpapCipher {
    * Based on the working Python implementation from tapo-rv30-ha
    */
   async handshake(): Promise<void> {
-    this.log.info('🔐 Starting TPAP/SPAKE2+ handshake on HTTPS port 4433');
+    this.log.info('🔐 Starting TPAP/SPAKE2+ handshake on HTTPS port 443');
 
     try {
       // Step 1: Discover device capabilities

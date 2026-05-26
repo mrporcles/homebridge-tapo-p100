@@ -20,18 +20,18 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
   protected initialise(platform: TapoPlatform, updateInterval?: number):void{
     this.log.debug(`Starting authentication for device: ${this.accessory.context.device.host}`);
     
-    // Try TPAP first for firmware 1.4.6+ devices (HTTPS port 4433)
+    // Try TPAP first for firmware 1.4.6+ devices (HTTPS port 443)
     this.log.info(`🔐 Attempting TPAP authentication for device: ${this.accessory.context.device.host}`);
     this.tpLinkAccessory.handshake_tpap().then(() => {
-      this.log.info('✅ TPAP authentication successful (firmware 1.4.6+, HTTPS)');
+      this.log.info('✅ TPAP authentication successful (firmware 1.4.6+, HTTPS port 443)');
       this.init(platform, updateInterval);
     }).catch((tpapError: Error) => {
       const errorMsg = tpapError.message;
       
       // Enhanced TPAP error detection and guidance
-      if (errorMsg.includes('ECONNREFUSED') && errorMsg.includes('4433')) {
-        this.log.warn('⚠️  TPAP Connection Refused on port 4433 - device may not support HTTPS TPAP');
-        this.log.warn('   This could indicate firmware < 1.4.6 or TPAP disabled on device');
+      if (errorMsg.includes('ECONNREFUSED') && errorMsg.includes('443')) {
+        this.log.info('📡 TPAP Connection Refused on port 443 - device likely firmware 1.4.0 (KLAP-compatible)');
+        this.log.info('   Falling back to KLAP authentication...');
       } else if (errorMsg.includes('-2402') || errorMsg.includes('TPAP_INVALID_CREDENTIALS')) {
         this.log.warn('⚠️  TPAP Authentication Failed - checking credentials and device compatibility');
         this.log.warn('   Ensure Third-Party Compatibility is enabled in Tapo app');
@@ -96,8 +96,8 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
     const deviceHost = this.accessory.context.device.host;
     this.log.error(`🚫 All authentication methods failed for device: ${deviceHost}`);
     this.log.error('');
-    this.log.error('⚠️  FIRMWARE 1.4.6 DETECTED: This firmware is currently NOT SUPPORTED');
-    this.log.error('   Firmware 1.4.6 blocks ALL local API access, even with Third-Party Compatibility');
+    this.log.error('⚠️  ALL AUTHENTICATION METHODS FAILED');
+    this.log.error('   This could indicate firmware 1.4.6 or other connectivity issues');
     this.log.error('');
     this.log.error('🔧 SOLUTIONS:');
     this.log.error('   Option 1: Check Tapo app for firmware version');

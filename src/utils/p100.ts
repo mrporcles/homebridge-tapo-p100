@@ -152,7 +152,7 @@ export default class P100 implements TpLinkAccessory{
 
   //TPAP (firmware 1.4.0+) handshake
   async handshake_tpap(): Promise<void> {
-    this.log.info('🔐 [TPAP] Starting TPAP/SPAKE2+ handshake for firmware 1.4.6+ (HTTPS port 4433)');
+    this.log.info('🔐 [TPAP] Starting TPAP/SPAKE2+ handshake for firmware 1.4.6+ (HTTPS port 443)');
 
     try {
       // Create new TPAP cipher with proper HTTPS support
@@ -164,7 +164,7 @@ export default class P100 implements TpLinkAccessory{
       this.is_tpap = false;
       const errorMsg = error instanceof Error ? error.message : String(error);
       if (errorMsg.includes('ECONNREFUSED') || errorMsg.includes('ENOTFOUND')) {
-        this.log.debug('📱 Device does not support HTTPS TPAP on port 4433');
+        this.log.debug('📱 Device does not support HTTPS TPAP on port 443');
       } else if (errorMsg.includes('certificate') || errorMsg.includes('SSL')) {
         this.log.debug('🔒 SSL/TLS handshake issue - device may have self-signed certificate');
       } else {
@@ -468,7 +468,7 @@ export default class P100 implements TpLinkAccessory{
           this.log.error('371 Error: ' + error.message);
           throw new Error('Get device info failed: ' + (error instanceof Error ? error.message : String(error)));
         });
-    } else if (this.tpapCipher) {
+    } else if (this.is_tpap && this.tpapCipher) {
       // Use new TPAP implementation with proper HTTPS support
       try {
         const response = await this.tpapCipher.sendRequest('get_device_info');

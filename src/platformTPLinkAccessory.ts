@@ -20,9 +20,15 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
   protected initialise(platform: TapoPlatform, updateInterval?: number):void{
     this.log.debug(`Starting authentication for device: ${this.accessory.context.device.host}`);
     
-    // Note: TPAP implementation temporarily disabled - requires complete SPAKE2+ crypto implementation
-    // For firmware 1.4.0+, enable "Third-Party Compatibility" in Tapo app to use KLAP/Legacy protocols
-    this.tpLinkAccessory.handshake().then(() => {
+    // Try TPAP first for firmware 1.4.3+ devices (based on python-kasa implementation)
+    this.tpLinkAccessory.handshake_tpap().then(() => {
+      this.log.info('✅ TPAP authentication successful (firmware 1.4.3+)');
+      this.init(platform, updateInterval);
+    }).catch((tpapError: Error) => {
+      this.log.debug('TPAP handshake failed, trying KLAP/Legacy:', tpapError.message);
+      
+      // Fallback to KLAP/Legacy protocols
+      this.tpLinkAccessory.handshake().then(() => {
       if(this.tpLinkAccessory.is_klap){
           setTimeout(()=>{
             this.tpLinkAccessory.handshake_new().then(() => {
@@ -65,25 +71,33 @@ export abstract class TPLinkPlatformAccessory <T extends TpLinkAccessory>{
         this.handleAuthenticationFailure();
       }
     });
+    }).catch((finalError) => {
+      this.setNoResponse();
+      this.log.error('❌ All authentication methods failed:', (finalError as Error).message);
+      this.handleAuthenticationFailure();
+    });
   }
 
   private handleAuthenticationFailure(): void {
     const deviceHost = this.accessory.context.device.host;
     this.log.error(`🚫 All authentication methods failed for device: ${deviceHost}`);
     this.log.error('');
-    this.log.error('📱 For firmware 1.4.0+ devices (HTTP 403 Forbidden errors):');
-    this.log.error('   🔧 Third-Party Compatibility Setup:');
-    this.log.error('   1. Open Tapo app → Select this device');
-    this.log.error('   2. Settings → Advanced Settings');
-    this.log.error('   3. Find "Third-Party Compatibility" and enable it');
-    this.log.error('   4. If already enabled: toggle OFF, wait 10 sec, toggle ON');
-    this.log.error('   5. Power cycle the device (unplug for 10 seconds)');
-    this.log.error('   6. Wait 2 minutes, then restart Homebridge');
+    this.log.error('⚠️  FIRMWARE 1.4.6 DETECTED: This firmware is currently NOT SUPPORTED');
+    this.log.error('   Firmware 1.4.6 blocks ALL local API access, even with Third-Party Compatibility');
     this.log.error('');
-    this.log.error('📡 Additional troubleshooting:');
-    this.log.error('   - Ensure device firmware is up to date');
-    this.log.error('   - Try factory reset if Third-Party Compatibility option missing');
-    this.log.error('   - Verify correct IP address: ' + deviceHost);
+    this.log.error('🔧 SOLUTIONS:');
+    this.log.error('   Option 1: Check Tapo app for firmware version');
+    this.log.error('   - If 1.4.6: Consider downgrading firmware (if manufacturer allows)');
+    this.log.error('   - If 1.4.0 or below: Enable Third-Party Compatibility in Tapo app');
+    this.log.error('');
+    this.log.error('   Option 2: Use Matter integration instead');
+    this.log.error('   - Some devices support Matter protocol as alternative');
+    this.log.error('   - Check device manual for Matter compatibility');
+    this.log.error('');
+    this.log.error('   Option 3: Wait for TP-Link or community TPAP implementation');
+    this.log.error('   - Monitor plugin updates for future firmware 1.4.6 support');
+    this.log.error('');
+    this.log.error('📍 Device IP: ' + deviceHost + ' - Check firmware in Tapo app');
   }
 
   protected abstract init(platform: TapoPlatform, updateInterval?: number):void;

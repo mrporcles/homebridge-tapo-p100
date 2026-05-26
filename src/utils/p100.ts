@@ -155,14 +155,14 @@ export default class P100 implements TpLinkAccessory{
 
     try {
       this.tpapCipher = new TpapCipher(this.log);
-      await this.tpapCipher.handshake(this.ip, this.email, this.password, this.raw_request.bind(this));
+      await this.tpapCipher.handshake(this.ip, this.email, this.password, this.tpap_raw_request.bind(this));
       this.is_tpap = true;
       this.log.info('✅ TPAP handshake successful - using latest encryption');
     } catch (error) {
       this.is_tpap = false;
       const errorMsg = error instanceof Error ? error.message : String(error);
-      if (errorMsg.includes('400') || errorMsg.includes('403')) {
-        this.log.debug('📱 Device does not support TPAP (likely older firmware) - will try KLAP/Legacy');
+      if (errorMsg.includes('400') || errorMsg.includes('403') || errorMsg.includes('-2203')) {
+        this.log.debug('📱 Device does not support TPAP or needs different auth method');
       } else {
         this.log.debug('❌ TPAP handshake failed:', errorMsg);
       }
@@ -183,7 +183,7 @@ export default class P100 implements TpLinkAccessory{
     this.log.debug('Handshake P100 on host: ' + this.ip);
 
     const headers = {
-      'Connection': 'Keep-Alive',
+      'Connection': 'close',
     };
     const config = {
       timeout: 5000,
@@ -228,7 +228,7 @@ export default class P100 implements TpLinkAccessory{
 
     const headers = {
       'Cookie': this.cookie,
-      'Connection': 'Keep-Alive',
+      'Connection': 'close',
     };
 
     if (this.tpLinkCipher) {
@@ -274,7 +274,7 @@ export default class P100 implements TpLinkAccessory{
     const URL = 'http://' + this.ip + '/app/' + path;
 
     const headers = {
-      'Connection': 'Keep-Alive',
+      'Connection': 'close', // Use close instead of keep-alive for firmware 1.4.0+ compatibility
       Host: this.ip,
       Accept: '*/*',
       'Content-Type': 'application/octet-stream',
@@ -469,7 +469,7 @@ export default class P100 implements TpLinkAccessory{
 
       const URL = 'http://' + this.ip + '/app/' + 'request';
       const headers = {
-        'Connection': 'Keep-Alive',
+        'Connection': 'close',
         Host: this.ip,
         Accept: '*/*',
         'Content-Type': 'application/octet-stream',
@@ -527,7 +527,7 @@ export default class P100 implements TpLinkAccessory{
 
       const URL = 'http://' + this.ip + '/app/' + 'request';
       const headers = {
-        'Connection': 'Keep-Alive',
+        'Connection': 'close',
         Host: this.ip,
         Accept: '*/*',
         'Content-Type': 'application/octet-stream',
@@ -719,7 +719,7 @@ export default class P100 implements TpLinkAccessory{
 
     const headers = {
       'Cookie': this.cookie,
-      'Connection': 'Keep-Alive',
+      'Connection': 'close',
     };
 
     if (this.tpLinkCipher) {
@@ -835,6 +835,42 @@ export default class P100 implements TpLinkAccessory{
     return new Promise<true>((resolve, reject) => {
       reject(new Error('KLAP cipher not initialized'));
     });
+  }
+
+  // TPAP-specific request method for HTTP port 80 (tls=0 devices)  
+  private async tpap_raw_request(path: string, data: Buffer, responseType: string): Promise<Buffer> {
+    // For TPAP, send to root URL (not /app/path)
+    const URL = `http://${this.ip}/` + (path || '');
+
+    const headers = {
+      'Connection': 'close',
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+
+    const config = {
+      timeout: 5000,
+      responseType: 'text' as const, // Always expect JSON text response for TPAP
+      headers: headers,
+    };
+
+    this.log.debug(`TPAP request to ${URL}`);
+    
+    return this._axios.post(URL, data.toString('utf8'), config)
+      .then((res: AxiosResponse) => {
+        this.log.debug(`TPAP response status: ${res.status}`);
+        
+        if (res.status !== 200) {
+          throw new Error(`TPAP request failed with status ${res.status}`);
+        }
+
+        // Return response as buffer
+        return Buffer.from(typeof res.data === 'string' ? res.data : JSON.stringify(res.data), 'utf8');
+      })
+      .catch((error: Error) => {
+        this.log.debug('TPAP request failed:', error.message);
+        throw new Error(`TPAP request failed: ${error.message}`);
+      });
   }
 
   protected async reconnect(): Promise<void> {
